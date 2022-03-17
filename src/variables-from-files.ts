@@ -20,9 +20,8 @@ export interface CICDVariable {
 
 export class VariablesFromFiles {
 
-    static async init(argv: Argv, writeStreams: WriteStreams, gitData: GitData): Promise<{ [name: string]: CICDVariable }> {
+    static async init(argv: Argv, writeStreams: WriteStreams, gitData: GitData, homeDir: string): Promise<{ [name: string]: CICDVariable }> {
         const cwd = argv.cwd;
-        const homeDir = argv.home;
         const remoteVariables = argv.remoteVariables;
         const autoCompleting = argv.autoCompleting;
         const homeVariablesFile = `${homeDir}/.gitlab-ci-local/variables.yml`;

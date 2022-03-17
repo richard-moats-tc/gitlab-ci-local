@@ -18,6 +18,7 @@ export class GitData {
         host: "gitlab.com",
         group: "fallback.group",
         project: "fallback.project",
+        default_branch: "main",
     };
 
     public readonly commit = {
@@ -85,6 +86,8 @@ export class GitData {
 
     private async initRemoteData(cwd: string, writeStreams: WriteStreams): Promise<void> {
         try {
+            // get GitLab version for feature emulation: https://docs.gitlab.com/ee/api/version.html
+
             const { stdout: gitRemote } = await Utils.spawn(["git", "remote", "-v"], cwd);
             const gitRemoteMatch = gitRemote.match(/.*(?:\/\/|@)(?<host>[^:/]*)(:(?<port>\d+)\/|:|\/)(?<group>.*)\/(?<project>.*?)(?:\r?\n|\.git)/);
 
@@ -94,6 +97,13 @@ export class GitData {
             this.remote.host = gitRemoteMatch.groups.host;
             this.remote.group = gitRemoteMatch.groups.group;
             this.remote.project = gitRemoteMatch.groups.project;
+
+            const { stdout: gitRemoteList } = await Utils.spawn(["git", "ls-remot\", \"--symref\", \"origin\", \"HEAD"], cwd);
+            const gitRemoteHeads = gitRemoteList.match(/ref: refs\/.*?\/(?<default>\w+)\s+HEAD/);
+
+            assert(gitRemoteHeads?.groups != null, "git ls-remote HEAD didn't provide valid matches");
+
+            this.remote.default_branch = gitRemoteHeads.groups.default;
         } catch (e) {
             if (e instanceof ExitError) {
                 writeStreams.stderr(chalk`{yellow ${e.message}}\n`);

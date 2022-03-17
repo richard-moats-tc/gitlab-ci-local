@@ -4,6 +4,7 @@ import {assert} from "./asserts";
 import * as fs from "fs-extra";
 import checksum from "checksum";
 import base64url from "base64url";
+import {ParseContext} from "./parser";
 import execa from "execa";
 
 export class Utils {
@@ -32,12 +33,12 @@ export class Utils {
         });
     }
 
-    static forEachRealJob(gitlabData: any, callback: (jobName: string, jobData: any) => void) {
+    static forEachRealJob(pCtx: ParseContext, gitlabData: any, callback: (pCtx: ParseContext, jobName: string, jobData: any) => void) {
         for (const [jobName, jobData] of Object.entries<any>(gitlabData)) {
             if (Job.illegalJobNames.includes(jobName) || jobName[0] === ".") {
                 continue;
             }
-            callback(jobName, jobData);
+            callback(pCtx.in(jobName), jobName, jobData);
         }
     }
 
@@ -95,46 +96,6 @@ export class Utils {
             return false;
         }
         return text.match(/[$][{]?\w*[}]?/g) != null;
-    }
-
-    static getRulesResult(rules: { if?: string; when?: string; allow_failure?: boolean }[], variables: { [key: string]: string }): { when: string; allowFailure: boolean } {
-        let when = "never";
-        let allowFailure = false;
-
-        for (const rule of rules) {
-            if (Utils.evaluateRuleIf(rule.if || "true", variables)) {
-                when = rule.when ? rule.when : "on_success";
-                allowFailure = rule.allow_failure ?? false;
-                break;
-            }
-        }
-
-        return {when, allowFailure};
-    }
-
-    static evaluateRuleIf(ruleIf: string, envs: { [key: string]: string }) {
-        let evalStr = ruleIf;
-
-        // Expand all variables
-        evalStr = evalStr.replace(/[$]\w+/g, (match) => {
-            const sub = envs[match.replace(/^[$]/, "")];
-            return sub != null ? `'${sub}'` : "null";
-        });
-
-        // Convert =~ to match function
-        evalStr = evalStr.replace(/\s*=~\s*(\/.*?\/[igmsuy]*)/g, ".match($1) != null");
-        evalStr = evalStr.replace(/\s*=~\s(.+?)(\)*?)(?:\s|$)/g, ".match(new RegExp($1)) != null$2"); // Without forward slashes
-
-        // Convert !~ to match function
-        evalStr = evalStr.replace(/\s*!~\s*(\/.*?\/[igmsuy]*)/g, ".match($1) == null");
-        evalStr = evalStr.replace(/\s*!~\s(.+?)(\)*?)(?:\s|$)/g, ".match(new RegExp($1)) == null$2"); // Without forward slashes
-
-        // Convert all null.match functions to false
-        evalStr = evalStr.replace(/null.match\(.+?\) != null/g, "false");
-        evalStr = evalStr.replace(/null.match\(.+?\) == null/g, "false");
-
-        // noinspection BadExpressionStatementJS
-        return eval(`if (${evalStr}) { true } else { false }`);
     }
 
     static async rsyncTrackedFiles(cwd: string, target: string): Promise<{ hrdeltatime: [number, number] }> {

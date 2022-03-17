@@ -12,8 +12,109 @@ import {GitData} from "./git-data";
 import {ParserIncludes} from "./parser-includes";
 import {Producers} from "./producers";
 import {VariablesFromFiles} from "./variables-from-files";
+import {LocalProjects} from "./local-projects";
+import {ExitError} from "./types/exit-error";
 import {Argv} from "./argv";
 import {WriteStreams} from "./types/write-streams";
+
+function fmt(v: any | undefined, f: (x: any) => string): string {
+    return v == null ? "" : f(v);
+}
+
+export type Dict = { [key: string]: string };
+
+export class ParseContext {
+    private _parent?: ParseContext;
+
+    public readonly type?: string;
+    public readonly name?: string;
+    public readonly value?: any;
+
+    readonly _dict?: Dict;
+
+    public static root = new class extends ParseContext {
+        constructor() { super(undefined, undefined, "_root_", undefined, {}); }
+        public toString(): string { return ""; }
+    };
+
+    private constructor(parent?: ParseContext, type?: string, name?: string, value?: any, dict?: Dict) {
+        this._parent = parent;
+        this.type = type;
+        this.name = name;
+        this.value = value;
+        this._dict = dict;
+    }
+
+    public call<R>(call: (pCtx: ParseContext) => R): R | never {
+        try {
+            return call(this);
+        } catch (e) {
+            if (e instanceof Error) {
+                if (e instanceof ParseError) throw e;
+                throw new ParseError(this, e.message, e.stack);
+            }
+            this.throw(`${e}`);
+        }
+    }
+
+    public resolve(name: string): string | undefined {
+        return this._dict?.[name] ?? this._parent?.resolve(name);
+    }
+
+    public in(name: string): ParseContext {
+        return new ParseContext(this, name);
+    }
+
+    public using(dict: { [key: string]: string }): ParseContext {
+        return new ParseContext(this, undefined, undefined, undefined, dict);
+    }
+
+    public resolving(name: string, value?: any): ParseContext {
+        return new ParseContext(this, name, value, "reference");
+    }
+
+    public toString(): string {
+        if (this.name) {
+            let s = "";
+            if (this._parent != ParseContext.root) s = `${this._parent} ⋯ `;
+            s += chalk`${fmt(this.type, t => `[${t}] `)}{blueBright ${this.name}}`;
+            if (this.value != undefined) {
+                const value = Array.isArray(this.value) ?
+                    this.value.join(" ⋯ ") : `'${this.value}'`;
+                s += chalk` ⟵  {greenBright ${value}}`;
+            }
+            return s;
+        }
+        return this._parent?.toString() || "";
+    }
+
+    public throw(message: string): never {
+        throw new ParseError(this, message);
+    }
+
+    public required(test: any, message: string): void | never {
+        if (test == null) this.throw(message);
+    }
+
+    public assert(test: boolean, message: string): void | never {
+        if (!test) this.throw(message);
+    }
+}
+
+export class ParseError implements Error {
+    readonly name: string;
+    readonly message: string;
+    readonly path: string;
+    readonly stack?: string;
+
+    constructor(pCtx: ParseContext, message: string, stack?: string) {
+        this.name = "ParseError";
+        this.message = message;
+        this.path = pCtx.toString();
+        this.stack = stack;
+        console.error(chalk`{red ${message ?? ""}}\n  {yellow … in ${pCtx}}`);
+    }
+}
 
 export class Parser {
 
@@ -60,35 +161,42 @@ export class Parser {
         return parser;
     }
 
+    static fail(message: string): string {
+        throw new ExitError(message);
+    }
+
     async init() {
         const argv = this.argv;
         const cwd = argv.cwd;
+        const home = argv.home ?? process.env.HOME ?? fail("Cannot determine user home directory");
         const writeStreams = this.writeStreams;
         const file = argv.file;
         const pipelineIid = this.pipelineIid;
         const fetchIncludes = argv.fetchIncludes;
         const gitData = await GitData.init(cwd, writeStreams);
-        const variablesFromFiles = await VariablesFromFiles.init(argv, writeStreams, gitData);
+        const variablesFromFiles = await VariablesFromFiles.init(argv, writeStreams, gitData, home);
+        const localProjects = await LocalProjects.init(argv, writeStreams, gitData, home);
 
         let yamlDataList: any[] = [{stages: [".pre", "build", "test", "deploy", ".post"]}];
         const gitlabCiData = await Parser.loadYaml(`${cwd}/${file}`);
-        yamlDataList = yamlDataList.concat(await ParserIncludes.init(gitlabCiData, cwd, writeStreams, gitData, 0, fetchIncludes));
+        yamlDataList = yamlDataList.concat(await ParserIncludes.init(gitlabCiData, cwd, writeStreams, gitData, 0, fetchIncludes, localProjects));
 
         const gitlabCiLocalData = await Parser.loadYaml(`${cwd}/.gitlab-ci-local.yml`);
-        yamlDataList = yamlDataList.concat(await ParserIncludes.init(gitlabCiLocalData, cwd, writeStreams, gitData, 0, fetchIncludes));
+        yamlDataList = yamlDataList.concat(await ParserIncludes.init(gitlabCiLocalData, cwd, writeStreams, gitData, 0, fetchIncludes, localProjects));
 
         const gitlabData: any = deepExtend({}, ...yamlDataList);
 
-        // Expand various fields in gitlabData
-        jobExpanders.reference(gitlabData, gitlabData);
-        jobExpanders.jobExtends(gitlabData);
-        jobExpanders.artifacts(gitlabData);
-        jobExpanders.image(gitlabData);
-        jobExpanders.services(gitlabData);
-        jobExpanders.beforeScripts(gitlabData);
-        jobExpanders.afterScripts(gitlabData);
-        jobExpanders.scripts(gitlabData);
+        const pCtx = ParseContext.root;
 
+        // Expand various fields in gitlabData
+        jobExpanders.reference(pCtx, gitlabData, gitlabData);
+        jobExpanders.jobExtends(pCtx, gitlabData);
+        jobExpanders.artifacts(pCtx, gitlabData);
+        jobExpanders.image(pCtx, gitlabData);
+        jobExpanders.services(pCtx, gitlabData);
+        jobExpanders.beforeScripts(pCtx, gitlabData);
+        jobExpanders.afterScripts(pCtx, gitlabData);
+        jobExpanders.scripts(pCtx, gitlabData);
 
         assert(gitlabData.stages && Array.isArray(gitlabData.stages), chalk`{yellow stages:} must be an array`);
         if (!gitlabData.stages.includes(".pre")) {
@@ -100,12 +208,12 @@ export class Parser {
         this._stages = gitlabData.stages;
 
         // Find longest job name
-        Utils.forEachRealJob(gitlabData, (jobName) => {
+        Utils.forEachRealJob(pCtx, gitlabData, (pCtx, jobName) => {
             this._jobNamePad = Math.max(this.jobNamePad, jobName.length);
         });
 
         // Check job variables for invalid hash of key value pairs
-        Utils.forEachRealJob(gitlabData, (jobName, jobData) => {
+        Utils.forEachRealJob(pCtx, gitlabData, (pCtx, jobName, jobData) => {
             for (const [key, value] of Object.entries(jobData.variables || {})) {
                 assert(
                     typeof value === "string" || typeof value === "number",
@@ -117,11 +225,11 @@ export class Parser {
         this._gitlabData = gitlabData;
 
         // Generate jobs and put them into stages
-        Utils.forEachRealJob(gitlabData, (jobName, jobData) => {
+        Utils.forEachRealJob(pCtx, gitlabData, (pCtx, jobName, jobData) => {
             assert(gitData != null, "gitData must be set");
             assert(variablesFromFiles != null, "homeVariables must be set");
 
-            const job = new Job({
+            const job = new Job(pCtx, {
                 argv,
                 writeStreams,
                 data: jobData,

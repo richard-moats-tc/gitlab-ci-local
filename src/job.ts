@@ -12,6 +12,8 @@ import {GitData} from "./git-data";
 import {assert} from "./asserts";
 import {CacheEntry} from "./cache-entry";
 import {Mutex} from "./mutex";
+import {Rules, RuleLike} from "./rules";
+import {ParseContext} from "./parser";
 import {Argv} from "./argv";
 import execa from "execa";
 
@@ -29,7 +31,7 @@ export class Job {
     readonly dependencies: string[] | null;
     readonly environment?: { name: string; url: string | null };
     readonly jobId: number;
-    readonly rules?: { if: string; when: string; allow_failure: boolean }[];
+    readonly rules?: RuleLike;
     readonly expandedVariables: { [key: string]: string };
     readonly allowFailure: boolean;
     readonly when: string;
@@ -51,7 +53,7 @@ export class Job {
     private readonly jobData: any;
     private readonly writeStreams: WriteStreams;
 
-    constructor(opt: JobOptions) {
+    constructor(pCtx: ParseContext, opt: JobOptions) {
         const jobData = opt.data;
         const gitData = opt.gitData;
         const globals = opt.globals;
@@ -104,6 +106,7 @@ export class Job {
             CI_COMMIT_TITLE: "Commit Title", // First line of commit message.
             CI_COMMIT_MESSAGE: "Commit Title\nMore commit text", // Full commit message
             CI_COMMIT_DESCRIPTION: "More commit text",
+            CI_DEFAULT_BRANCH: gitData.remote.default_branch,
             CI_PIPELINE_SOURCE: "push",
             CI_JOB_ID: `${this.jobId}`,
             CI_PIPELINE_ID: `${this.pipelineIid + 1000}`,
@@ -168,9 +171,26 @@ export class Job {
 
         // Set {when, allowFailure} based on rules result
         if (this.rules) {
-            const ruleResult = Utils.getRulesResult(this.rules, this.expandedVariables);
-            this.when = ruleResult.when;
-            this.allowFailure = ruleResult.allowFailure;
+            const finalRule = Rules.evaluate(pCtx.in("rules").using(this.expandedVariables), this.rules);
+            if (finalRule) {
+                let reason: string;
+                if (finalRule.result) {
+                    // a true rule evaluation was found
+                    this.when = finalRule.rule.when ?? "on_success";
+                    this.allowFailure = finalRule.rule.allow_failure ?? false;
+                    reason = chalk`due to rule: {bold ${finalRule.rule.if ?? "«no-expression»"}}`;
+                } else {
+                    // all rules evaluated to false
+                    this.when = "never";
+                    this.allowFailure = false;
+                    reason = chalk`because all rules evaluated to {bold false}`;
+                }
+                //this.writeStreams.stdout(this.chalkJobName + chalk` running {${this.when == "never" ? "yellow" : "green"} ${this.when}} ` + `${reason}\n`);
+            } else {
+                // no rules were evaluated; default to 'on_success'
+                this.when = "on_success";
+                this.allowFailure = false;
+            }
         }
 
         if (this.interactive && (this.when !== "manual" || this.imageName !== null)) {
@@ -293,7 +313,7 @@ export class Job {
         return this.jobData["description"] ?? "";
     }
 
-    get artifacts(): { paths?: string[]; exclude?: string[]; reports?: { dotenv?: string } }|null {
+    get artifacts(): { paths?: string[]; exclude?: string[]; reports?: { dotenv?: string; junit?: string } } | null {
         return this.jobData["artifacts"];
     }
 
@@ -634,13 +654,12 @@ export class Job {
             env: {...this.expandedVariables, ...reportsDotenvVariables, ...process.env},
         });
 
+        let buf = "";
         const outFunc = (e: any, stream: (txt: string) => void, colorize: (str: string) => string) => {
             this.refreshLongRunningSilentTimeout(writeStreams);
-            for (const line of `${e}`.split(/\r?\n/)) {
-                if (line.length === 0) {
-                    continue;
-                }
-
+            const lines = (buf + `${e}`).split(/\r?\n/);
+            buf = lines.pop() ?? "";
+            for (const line of lines) {
                 stream(`${this.chalkJobName} `);
                 if (!line.startsWith("\u001b[32m$")) {
                     stream(`${colorize(">")} `);
@@ -823,6 +842,12 @@ export class Job {
         if (reportDotenv != null) {
             cpCmd += `mkdir -p ../../artifacts/${safeJobName}/.gitlab-ci-reports/dotenv\n`;
             cpCmd += `rsync -Ra ${reportDotenv} ../../artifacts/${safeJobName}/.gitlab-ci-reports/dotenv/.\n`;
+        }
+
+        const reportJUnit = this.artifacts.reports?.junit ?? null;
+        if (reportJUnit != null) {
+            cpCmd += `mkdir -p ../../artifacts/${safeJobName}/.gitlab-ci-reports/junit\n`;
+            cpCmd += `rsync -Ra ${reportJUnit} ../../artifacts/${safeJobName}/.gitlab-ci-reports/junit/.\n`;
         }
 
         time = process.hrtime();

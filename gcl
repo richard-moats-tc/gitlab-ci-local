@@ -1,0 +1,8 @@
+#!/bin/sh
+BASE=$(dirname $0)
+if [[ "$*" != *"--cwd"* ]]; then
+    WD="--cwd ${PWD}"
+fi
+
+cd "${BASE}"
+exec "${BASE}/ts-node" ${WD} "$@"

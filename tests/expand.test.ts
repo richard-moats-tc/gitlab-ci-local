@@ -2,6 +2,7 @@ import chalk from "chalk";
 import * as jobExpanders from "../src/job-expanders";
 import {Utils} from "../src/utils";
 import {assert} from "../src/asserts";
+import { ParseContext } from "../src/parser";
 
 test("GITLAB_USER_LOGIN positive", () => {
     const variables = {APP_ENV: "$GITLAB_USER_LOGIN", HOSTNAME: "${GITLAB_USER_LOGIN}-stage.domain.com"};
@@ -42,7 +43,7 @@ test("Expand null", () => {
 
 test("extends invalid job", () => {
     try {
-        jobExpanders.jobExtends({
+        jobExpanders.jobExtends(ParseContext.root, {
             "test-job": {extends: ["build-job"]},
         });
         expect(true).toBe(false);
@@ -54,7 +55,7 @@ test("extends invalid job", () => {
 
 test("extends infinite loop", () => {
     try {
-        jobExpanders.jobExtends({
+        jobExpanders.jobExtends(ParseContext.root, {
             "build-job": {extends: ["test-job"]},
             "test-job": {extends: ["build-job"]},
         });
@@ -75,7 +76,7 @@ test("extends simple", () => {
         },
     };
 
-    jobExpanders.jobExtends(gitlabData);
+    jobExpanders.jobExtends(ParseContext.root, gitlabData);
 
     const expected = {
         "test-job": {
